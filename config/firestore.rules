@@ -1,0 +1,268 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isLegacyOwner(userId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(userId))
+        && get(/databases/$(database)/documents/users/$(userId)).data.email == request.auth.token.email;
+    }
+
+    function activeBookingPath(bookingId) {
+      return /databases/$(database)/documents/activeBookings/$(bookingId);
+    }
+
+    function bookingPath(bookingId) {
+      return /databases/$(database)/documents/bookings/$(bookingId);
+    }
+
+    function ownsBookingAfter(bookingId, spaceId, status) {
+      return existsAfter(bookingPath(bookingId))
+        && getAfter(bookingPath(bookingId)).data.userId == request.auth.uid
+        && getAfter(bookingPath(bookingId)).data.workspaceId == spaceId
+        && getAfter(bookingPath(bookingId)).data.status == status;
+    }
+
+    function ownsActiveBookingAfter(bookingId, spaceId) {
+      return existsAfter(activeBookingPath(bookingId))
+        && getAfter(activeBookingPath(bookingId)).data.userId == request.auth.uid
+        && getAfter(activeBookingPath(bookingId)).data.workspaceId == spaceId
+        && getAfter(activeBookingPath(bookingId)).data.status == 'pending'
+        && ownsBookingAfter(bookingId, spaceId, 'pending');
+    }
+
+    function ownsActiveBookingBefore(bookingId, spaceId) {
+      return exists(activeBookingPath(bookingId))
+        && get(activeBookingPath(bookingId)).data.userId == request.auth.uid
+        && get(activeBookingPath(bookingId)).data.workspaceId == spaceId
+        && get(activeBookingPath(bookingId)).data.status in ['pending', 'confirmed'];
+    }
+
+    function releasesBookingAfter(bookingId, spaceId) {
+      return existsAfter(bookingPath(bookingId))
+        && getAfter(bookingPath(bookingId)).data.userId == request.auth.uid
+        && getAfter(bookingPath(bookingId)).data.workspaceId == spaceId
+        && getAfter(bookingPath(bookingId)).data.status in ['cancelled', 'expired'];
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId)
+        && request.resource.data.role == 'user';
+      allow update: if isAdmin()
+        || (isOwner(userId) && request.resource.data.role == resource.data.role);
+      allow delete: if isAdmin();
+    }
+
+    match /spaces/{spaceId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (
+          signedIn()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'lastBookingId', 'updatedAt'])
+          && request.resource.data.status == 'booked'
+          && request.resource.data.lastBookingId is string
+          && ownsActiveBookingAfter(request.resource.data.lastBookingId, spaceId)
+        )
+        || (
+          signedIn()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['bookedDates', 'bookingDateChange', 'updatedAt'])
+          && request.resource.data.bookedDates is list
+          && request.resource.data.bookingDateChange.action == 'reserve'
+          && request.resource.data.bookingDateChange.bookingId is string
+          && request.resource.data.bookingDateChange.date is string
+          && ownsActiveBookingAfter(request.resource.data.bookingDateChange.bookingId, spaceId)
+          && getAfter(bookingPath(request.resource.data.bookingDateChange.bookingId)).data.date == request.resource.data.bookingDateChange.date
+          && request.resource.data.bookedDates.hasAny([request.resource.data.bookingDateChange.date])
+          && request.resource.data.bookedDates.hasAll(resource.data.get('bookedDates', []))
+          && !resource.data.get('bookedDates', []).hasAny([request.resource.data.bookingDateChange.date])
+          && request.resource.data.bookedDates.size() == resource.data.get('bookedDates', []).size() + 1
+        )
+        || (
+          signedIn()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['bookedDates', 'bookingDateChange', 'status', 'updatedAt'])
+          && request.resource.data.bookedDates is list
+          && request.resource.data.bookingDateChange.action in ['release', 'orphan-release']
+          && request.resource.data.bookingDateChange.bookingId is string
+          && request.resource.data.bookingDateChange.date is string
+          && ownsActiveBookingBefore(request.resource.data.bookingDateChange.bookingId, spaceId)
+          && (
+            (
+              request.resource.data.bookingDateChange.action == 'release'
+              && existsAfter(bookingPath(request.resource.data.bookingDateChange.bookingId))
+              && getAfter(bookingPath(request.resource.data.bookingDateChange.bookingId)).data.date == request.resource.data.bookingDateChange.date
+              && getAfter(bookingPath(request.resource.data.bookingDateChange.bookingId)).data.status in ['cancelled', 'expired']
+            )
+            || (
+              request.resource.data.bookingDateChange.action == 'orphan-release'
+              && !existsAfter(bookingPath(request.resource.data.bookingDateChange.bookingId))
+              && get(activeBookingPath(request.resource.data.bookingDateChange.bookingId)).data.date == request.resource.data.bookingDateChange.date
+            )
+          )
+          && !existsAfter(activeBookingPath(request.resource.data.bookingDateChange.bookingId))
+          && resource.data.get('bookedDates', []).hasAny([request.resource.data.bookingDateChange.date])
+          && !request.resource.data.bookedDates.hasAny([request.resource.data.bookingDateChange.date])
+          && resource.data.get('bookedDates', []).hasAll(request.resource.data.bookedDates)
+          && resource.data.get('bookedDates', []).size() == request.resource.data.bookedDates.size() + 1
+          && (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status'])
+            || (
+              request.resource.data.status == 'available'
+              && resource.data.lastBookingId == request.resource.data.bookingDateChange.bookingId
+            )
+          )
+        )
+        || (
+          signedIn()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+          && request.resource.data.status == 'available'
+          && resource.data.lastBookingId is string
+          && !existsAfter(activeBookingPath(resource.data.lastBookingId))
+          && ownsActiveBookingBefore(resource.data.lastBookingId, spaceId)
+          && (
+            releasesBookingAfter(resource.data.lastBookingId, spaceId)
+            || !existsAfter(bookingPath(resource.data.lastBookingId))
+          )
+        );
+    }
+
+    match /bookings/{bookingId} {
+      allow get: if isAdmin()
+        || (
+          signedIn()
+          && exists(activeBookingPath(bookingId))
+          && isOwner(get(activeBookingPath(bookingId)).data.userId)
+        )
+        || isOwner(resource.data.userId);
+      allow list: if isAdmin() || isOwner(resource.data.userId);
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.workspaceId is string
+        && request.resource.data.status == 'pending'
+        && ownsActiveBookingAfter(bookingId, request.resource.data.workspaceId);
+      allow update: if isAdmin()
+        || (
+          isOwner(resource.data.userId)
+          && resource.data.status in ['pending', 'confirmed']
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+          && request.resource.data.status in ['cancelled', 'expired']
+          && ownsBookingAfter(bookingId, resource.data.workspaceId, request.resource.data.status)
+          && !existsAfter(activeBookingPath(bookingId))
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /bookings/{bookingId} {
+      allow get: if isAdmin()
+        || (
+          signedIn()
+          && exists(activeBookingPath(bookingId))
+          && isOwner(get(activeBookingPath(bookingId)).data.userId)
+        )
+        || isOwner(resource.data.userId);
+      allow list: if isAdmin() || isOwner(resource.data.userId);
+      allow create: if (
+          isAdmin()
+          && request.resource.data.status in ['pending', 'confirmed']
+        ) || (
+          signedIn()
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.workspaceId is string
+          && request.resource.data.status == 'pending'
+          && ownsBookingAfter(bookingId, request.resource.data.workspaceId, 'pending')
+        );
+      allow update: if isAdmin();
+      allow delete: if isAdmin()
+        || (
+          isOwner(resource.data.userId)
+          && (
+            (
+              existsAfter(bookingPath(bookingId))
+              && getAfter(bookingPath(bookingId)).data.status in ['cancelled', 'expired']
+            )
+            || !existsAfter(bookingPath(bookingId))
+          )
+        );
+    }
+
+    match /activeBookings/{bookingId} {
+      allow get: if isAdmin()
+        || (
+          signedIn()
+          && exists(bookingPath(bookingId))
+          && isOwner(get(bookingPath(bookingId)).data.userId)
+        )
+        || isOwner(resource.data.userId);
+      allow list: if isAdmin() || isOwner(resource.data.userId);
+      allow create: if (
+          isAdmin()
+          && request.resource.data.status in ['pending', 'confirmed']
+        ) || (
+          signedIn()
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.workspaceId is string
+          && request.resource.data.status == 'pending'
+          && ownsBookingAfter(bookingId, request.resource.data.workspaceId, 'pending')
+        );
+      allow update: if isAdmin();
+      allow delete: if isAdmin()
+        || (
+          isOwner(resource.data.userId)
+          && (
+            (
+              existsAfter(bookingPath(bookingId))
+              && getAfter(bookingPath(bookingId)).data.status in ['cancelled', 'expired']
+            )
+            || !existsAfter(bookingPath(bookingId))
+          )
+        );
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.userName is string
+        && request.resource.data.workspaceId is string
+        && (!('comment' in request.resource.data) || request.resource.data.comment is string)
+        && request.resource.data.rating is number
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5;
+      allow update: if signedIn()
+        && (
+          isAdmin()
+          || request.auth.uid == resource.data.userId
+          || isLegacyOwner(resource.data.userId)
+        )
+        && (isAdmin() || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating', 'comment', 'updatedAt']))
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.userName == resource.data.userName
+        && request.resource.data.workspaceId == resource.data.workspaceId
+        && request.resource.data.comment is string
+        && request.resource.data.rating is number
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5;
+      allow delete: if signedIn()
+        && (
+          isAdmin()
+          || request.auth.uid == resource.data.userId
+          || isLegacyOwner(resource.data.userId)
+        );
+    }
+  }
+}

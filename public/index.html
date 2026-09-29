@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WORKSPACE</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+</head>
+
+<body data-page="index">
+  <header class="site-header">
+    <div class="container navbar">
+      <a href="index.html" class="brand">
+        <span class="brand-mark">W</span>
+        <span>WORKSPACE</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html">Главная</a>
+        <a href="bookings.html">Бронирования</a>
+        <a href="profile.html">Личный кабинет</a>
+        <a href="admin.html">Админ-панель</a>
+      </nav>
+      <a href="login.html" class="user-pill" data-user-badge>Загрузка...</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <h1>Бронируйте комфортное рабочее место за минуты.</h1>
+          <p>
+            Удобные зоны для фокуса, переговоров и командной работы. Выбирайте формат пространства,
+            подходящую дату и удобное время — всё в одном приложении.
+          </p>
+        </div>
+        <div class="panel hero-card">
+          <div class="card-visual">
+            <div class="visual-overlay">
+              <strong>Skyline Studio</strong>
+              <span>Казахстан, Алматы · до 6 человек · от 8 000 ₸/час за 1 человека</span>
+            </div>
+          </div>
+          <div class="metrics">
+            <div class="metric">
+              <b data-stat>0</b>
+              <span>доступных рабочих зон</span>
+            </div>
+            <div class="metric">
+              <b data-stat>0</b>
+              <span>минимальная цена за 1 час</span>
+            </div>
+            <div class="metric">
+              <b data-stat>0</b>
+              <span>городов в каталоге</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="catalog" class="section">
+      <div class="container">
+        <div class="section-heading">
+          <h2>Каталог рабочих зон</h2>
+          <div class="muted">Свежие варианты и быстрый поиск</div>
+        </div>
+
+        <div class="controls">
+          <div class="search" style="min-width: 280px; flex: 1;">
+            <input type="search" data-search placeholder="Поиск по названию, городу, описанию…" />
+          </div>
+          <select class="control-select" data-sort style="max-width: 220px;">
+            <option value="rating">Сначала популярные</option>
+            <option value="date">Сначала новые</option>
+            <option value="price-low">По возрастанию цены</option>
+            <option value="price-high">По убыванию цены</option>
+          </select>
+        </div>
+
+        <div class="filter-group" style="margin-bottom: 1.2rem;">
+          <button class="filter-chip active" data-category="all">Все</button>
+          <button class="filter-chip" data-category="Частный офис">Частный офис</button>
+          <button class="filter-chip" data-category="Общая рабочая зона">Общая рабочая зона</button>
+          <button class="filter-chip" data-category="Переговорная">Переговорная</button>
+          <button class="filter-chip" data-category="Зал мероприятий">Зал мероприятий</button>
+          <button class="filter-chip" data-category="Тихая комната">Тихая комната</button>
+          <button class="filter-chip" data-category="Мастерская">Мастерская</button>
+        </div>
+
+        <div class="catalog-grid" data-catalog></div>
+        <div style="margin-top: 1.2rem; text-align: center;">
+          <button class="btn secondary" data-show-more>Показать ещё</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="js/firebase-config.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+
+</html>

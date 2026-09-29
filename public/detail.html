@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WORKSPACE | Детали</title>
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body data-page="detail">
+    <header class="site-header">
+      <div class="container navbar">
+        <a href="index.html" class="brand">
+          <span class="brand-mark">W</span>
+          <span>WORKSPACE</span>
+        </a>
+        <nav class="nav-links">
+          <a href="index.html">Главная</a>
+          <a href="bookings.html">Бронирования</a>
+          <a href="profile.html">Личный кабинет</a>
+          <a href="admin.html">Админ-панель</a>
+        </nav>
+        <a href="login.html" class="user-pill" data-user-badge>Загрузка...</a>
+      </div>
+    </header>
+
+    <main class="container" data-detail></main>
+
+    <section class="section">
+      <div class="container">
+        <div class="section-heading">
+          <h2>Похожие варианты</h2>
+        </div>
+        <div class="catalog-grid" data-related></div>
+        <div style="margin-top: 1.2rem; text-align: center;">
+          <button class="btn secondary" data-show-more-related>Показать ещё</button>
+        </div>
+      </div>
+    </section>
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+    <script src="js/firebase-config.js"></script>
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

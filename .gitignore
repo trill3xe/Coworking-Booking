@@ -1,0 +1,72 @@
+# Журналы
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+firebase-debug.log*
+firebase-debug.*.log*
+
+# Кэш Firebase
+.firebase/
+
+# Конфигурация Firebase
+
+# .firebaserc
+
+# Временные данные
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Каталоги инструментированных библиотек, созданных jscoverage/JSCover
+lib-cov
+
+# Каталог отчетов о покрытии кода для инструментов вроде Istanbul
+coverage
+
+# Отчеты о покрытии тестами для nyc
+.nyc_output
+
+# Промежуточные файлы Grunt
+.grunt
+
+# Каталог зависимостей Bower
+bower_components
+
+# Конфигурация node-waf
+.lock-wscript
+
+# Скомпилированные бинарные модули Node.js
+build/Release
+
+# Каталоги зависимостей
+node_modules/
+
+# Необязательный каталог кэша npm
+.npm
+
+# Необязательный кэш ESLint
+.eslintcache
+
+# Необязательная история REPL
+.node_repl_history
+
+# Результат команды npm pack
+*.tgz
+
+# Файл проверки целостности Yarn
+.yarn-integrity
+
+# Файл переменных окружения dotenv
+.env
+
+# Сгенерированные файлы Data Connect
+.dataconnect
+
+serviceAccountKey.json
+scripts/serviceAccountKey.json
+
+# Техническое задание
+technical_specifications-3.md

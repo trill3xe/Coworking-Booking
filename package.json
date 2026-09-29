@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "firebase": "^12.19.0",
+    "firebase-admin": "^14.4.0"
+  },
+  "scripts": {
+    "test": "node --check public/js/app.js && node --check public/js/database.js && node --check public/js/login.js && node --check public/js/demo-data.js && node --check scripts/seed.js && node --check scripts/seedData.js",
+    "seed": "node scripts/seed.js"
+  }
+}
