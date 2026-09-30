@@ -487,6 +487,16 @@ let firestore = null;
   }
 
 
+  function escapeEmailHtml(value) {
+    return String(value || '').replace(/[&<>"']/g, (character) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    })[character]);
+  }
+
   async function createBooking(payload) {
     const bookingId = payload.id || `booking_${Date.now()}`;
     const booking = {
@@ -495,6 +505,11 @@ let firestore = null;
       createdAt: payload.createdAt || new Date().toISOString()
     };
     const duration = Number(booking.duration);
+    const seats = Number(booking.seats);
+    if (!Number.isInteger(seats) || seats < 1) {
+      throw new Error('Количество человек должно быть не меньше одного');
+    }
+    booking.seats = seats;
     if (!Number.isInteger(duration) || duration < 1 || duration > 6) {
       throw new Error('Максимальная продолжительность бронирования — 6 часов');
     }
@@ -519,14 +534,48 @@ let firestore = null;
     booking.expiresAt = new Date(`${booking.date}T${String(endHour).padStart(2, '0')}:${endMinute}:00`);
     if (Number.isNaN(booking.expiresAt.getTime())) throw new Error('Некорректное время окончания аренды');
     const db = getDb();
+    if (booking.status !== 'confirmed' || booking.paymentStatus !== 'paid' || booking.paymentMethod !== 'fake-card') {
+      throw new Error('Для подтверждения брони завершите демонстрационную оплату');
+    }
+    if (!booking.userEmail || !booking.workspaceTitle || !booking.address) {
+      throw new Error('Не удалось подготовить данные бронирования для письма');
+    }
+
     const bookingRef = db.collection('bookings').doc(bookingId);
     const activeRef = db.collection('activeBookings').doc(bookingId);
     const spaceRef = db.collection('spaces').doc(String(booking.workspaceId));
+    const mailRef = db.collection('mail').doc();
+    const escape = escapeEmailHtml;
+    const subject = `Бронь подтверждена — ${booking.workspaceTitle}`;
+    const details = [
+      `Помещение: ${booking.workspaceTitle}`,
+      `Адрес: ${booking.city ? `${booking.city}, ` : ''}${booking.address}`,
+      `Дата: ${booking.date}`,
+      `Время: ${booking.timeSlot}`,
+      `Количество гостей: ${booking.seats}`,
+      `Продолжительность: ${booking.duration} ч.`,
+      `Сумма: ${booking.amount} ₸`,
+      `Номер брони: ${bookingId}`
+    ];
+    const emailText = [
+      `Здравствуйте, ${booking.userName || 'гость'}!`,
+      '',
+      'Бронирование подтверждено. Это письмо — ваш пропуск в бизнес-центр.',
+      '',
+      ...details,
+      '',
+      'Покажите это письмо на входе в бизнес-центр.'
+    ].join('\n');
+    const emailHtml = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033"><h1>Бронирование подтверждено</h1><p>Здравствуйте, ${escape(booking.userName || 'гость')}! Это письмо — ваш пропуск в бизнес-центр.</p><table style="border-collapse:collapse;width:100%">${details.map((detail) => `<tr><td style="padding:8px;border-bottom:1px solid #e5e7eb">${escape(detail.split(':')[0])}</td><td style="padding:8px;border-bottom:1px solid #e5e7eb"><strong>${escape(detail.slice(detail.indexOf(':') + 1).trim())}</strong></td></tr>`).join('')}</table><p>Покажите это письмо на входе в бизнес-центр.</p></div>`;
 
     await db.runTransaction(async (transaction) => {
       const spaceSnapshot = await transaction.get(spaceRef);
       if (!spaceSnapshot.exists) throw new Error('Рабочая зона не найдена');
       const spaceData = spaceSnapshot.data();
+      const capacity = Math.max(1, Number(spaceData.capacity) || 1);
+      if (seats > capacity) {
+        throw new Error(`В помещении максимум ${capacity} мест`);
+      }
       const bookedDates = Array.isArray(spaceData.bookedDates) ? [...spaceData.bookedDates] : [];
       const isOccupied = spaceData.status === 'booked' && bookedDates.length === 0;
       if (isOccupied) throw new Error('Рабочая зона уже занята');
@@ -559,6 +608,12 @@ let firestore = null;
         }
         transaction.update(spaceRef, spaceUpdate);
       }
+      transaction.set(mailRef, {
+        to: booking.userEmail,
+        bookingId,
+        createdAt: new Date().toISOString(),
+        message: { subject, text: emailText, html: emailHtml }
+      });
     });
     return bookingId;
   }
