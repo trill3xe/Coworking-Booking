@@ -41,8 +41,8 @@ service cloud.firestore {
       return existsAfter(activeBookingPath(bookingId))
         && getAfter(activeBookingPath(bookingId)).data.userId == request.auth.uid
         && getAfter(activeBookingPath(bookingId)).data.workspaceId == spaceId
-        && getAfter(activeBookingPath(bookingId)).data.status == 'pending'
-        && ownsBookingAfter(bookingId, spaceId, 'pending');
+        && getAfter(activeBookingPath(bookingId)).data.status in ['pending', 'confirmed']
+        && ownsBookingAfter(bookingId, spaceId, getAfter(activeBookingPath(bookingId)).data.status);
     }
 
     function ownsActiveBookingBefore(bookingId, spaceId) {
@@ -81,7 +81,7 @@ service cloud.firestore {
         )
         || (
           signedIn()
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['bookedDates', 'bookingDateChange', 'updatedAt'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['bookedDates', 'bookingDateChange', 'updatedAt', 'status', 'lastBookingId'])
           && request.resource.data.bookedDates is list
           && request.resource.data.bookingDateChange.action == 'reserve'
           && request.resource.data.bookingDateChange.bookingId is string
@@ -92,6 +92,15 @@ service cloud.firestore {
           && request.resource.data.bookedDates.hasAll(resource.data.get('bookedDates', []))
           && !resource.data.get('bookedDates', []).hasAny([request.resource.data.bookingDateChange.date])
           && request.resource.data.bookedDates.size() == resource.data.get('bookedDates', []).size() + 1
+          && (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'lastBookingId'])
+            || (
+              request.resource.data.diff(resource.data).affectedKeys().hasAll(['status', 'lastBookingId'])
+              && request.resource.data.status == 'booked'
+              && request.resource.data.lastBookingId == request.resource.data.bookingDateChange.bookingId
+              && getAfter(bookingPath(request.resource.data.bookingDateChange.bookingId)).data.status == 'confirmed'
+            )
+          )
         )
         || (
           signedIn()
@@ -153,7 +162,7 @@ service cloud.firestore {
       allow create: if signedIn()
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.workspaceId is string
-        && request.resource.data.status == 'pending'
+        && request.resource.data.status in ['pending', 'confirmed']
         && ownsActiveBookingAfter(bookingId, request.resource.data.workspaceId);
       allow update: if isAdmin()
         || (
@@ -183,8 +192,8 @@ service cloud.firestore {
           signedIn()
           && request.resource.data.userId == request.auth.uid
           && request.resource.data.workspaceId is string
-          && request.resource.data.status == 'pending'
-          && ownsBookingAfter(bookingId, request.resource.data.workspaceId, 'pending')
+          && request.resource.data.status in ['pending', 'confirmed']
+          && ownsBookingAfter(bookingId, request.resource.data.workspaceId, request.resource.data.status)
         );
       allow update: if isAdmin();
       allow delete: if isAdmin()
@@ -216,8 +225,8 @@ service cloud.firestore {
           signedIn()
           && request.resource.data.userId == request.auth.uid
           && request.resource.data.workspaceId is string
-          && request.resource.data.status == 'pending'
-          && ownsBookingAfter(bookingId, request.resource.data.workspaceId, 'pending')
+          && request.resource.data.status in ['pending', 'confirmed']
+          && ownsBookingAfter(bookingId, request.resource.data.workspaceId, request.resource.data.status)
         );
       allow update: if isAdmin();
       allow delete: if isAdmin()
@@ -231,6 +240,24 @@ service cloud.firestore {
             || !existsAfter(bookingPath(bookingId))
           )
         );
+    }
+
+    match /mail/{mailId} {
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['to', 'bookingId', 'createdAt', 'message'])
+        && request.resource.data.to is string
+        && request.resource.data.to == request.auth.token.email
+        && request.resource.data.bookingId is string
+        && existsAfter(bookingPath(request.resource.data.bookingId))
+        && getAfter(bookingPath(request.resource.data.bookingId)).data.userId == request.auth.uid
+        && getAfter(bookingPath(request.resource.data.bookingId)).data.status == 'confirmed'
+        && getAfter(bookingPath(request.resource.data.bookingId)).data.userEmail == request.auth.token.email
+        && request.resource.data.message is map
+        && request.resource.data.message.keys().hasOnly(['subject', 'text', 'html'])
+        && request.resource.data.message.subject is string
+        && request.resource.data.message.text is string
+        && request.resource.data.message.html is string;
+      allow read, update, delete: if false;
     }
 
     match /reviews/{reviewId} {

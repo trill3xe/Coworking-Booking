@@ -668,6 +668,18 @@ textarea {
   gap: 0.9rem;
 }
 
+.payment-modal[hidden] {
+  display: none;
+}
+
+.payment-modal .modal-container {
+  width: min(480px, 100%);
+}
+
+.payment-card-details {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .form-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

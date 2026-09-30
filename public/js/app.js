@@ -1285,15 +1285,48 @@ function renderDetail() {
             </label>
             <label>
               <span class="muted">Количество человек</span>
-              <input class="input" type="number" name="seats" min="1" max="${Math.min(Number(space.capacity) || 1, 10)}" value="1" required>
+              <input class="input" type="number" name="seats" min="1" max="${Math.max(1, Number(space.capacity) || 1)}" step="1" value="1" required>
             </label>
           </div>
           <div class="summary-box">
             <strong>Итог: <span data-total>${formatPrice(space.pricePerHour)}</span></strong>
             <span class="muted">Сумма считается по количеству человек и длительности брони.</span>
           </div>
-          <button class="btn primary" style="width: 100%; margin-top: 1rem;" type="submit">Забронировать</button>
+          <button class="btn primary" style="width: 100%; margin-top: 1rem;" type="submit">Перейти к оплате</button>
         </form>
+
+        <div class="modal-overlay payment-modal" data-payment-modal hidden>
+          <div class="modal-container" role="dialog" aria-modal="true" aria-labelledby="payment-modal-title">
+            <div class="modal-header">
+              <h3 id="payment-modal-title">Оплата бронирования</h3>
+              <button class="modal-close-btn" type="button" data-payment-close aria-label="Закрыть">&times;</button>
+            </div>
+            <div class="modal-body">
+              <p class="muted">Демонстрационная оплата. Не вводите данные настоящей карты — они не сохраняются.</p>
+              <form class="form-grid" data-payment-form>
+                <label>
+                  <span class="muted">Фамилия и имя владельца карты</span>
+                  <input class="input" type="text" name="cardholder" autocomplete="cc-name" maxlength="80" placeholder="Иванов Иван" required>
+                </label>
+                <label>
+                  <span class="muted">Номер карты</span>
+                  <input class="input" type="text" name="cardNumber" inputmode="numeric" autocomplete="cc-number" maxlength="19" pattern="[0-9 ]{16,19}" placeholder="0000 0000 0000 0000" required>
+                </label>
+                <div class="form-grid payment-card-details">
+                  <label>
+                    <span class="muted">Срок действия</span>
+                    <input class="input" type="text" name="cardExpiry" inputmode="numeric" autocomplete="cc-exp" maxlength="5" pattern="(0[1-9]|1[0-2])/[0-9]{2}" placeholder="ММ/ГГ" required>
+                  </label>
+                  <label>
+                    <span class="muted">CVC</span>
+                    <input class="input" type="password" name="cardCvc" inputmode="numeric" autocomplete="cc-csc" minlength="3" maxlength="3" pattern="[0-9]{3}" required>
+                  </label>
+                </div>
+                <button class="btn primary" type="submit">Оплатить и подтвердить бронь</button>
+              </form>
+            </div>
+          </div>
+        </div>
 
         <form data-review-form style="margin-top: 1.2rem;">
           <div class="section-heading" style="margin-bottom: 0.8rem;">
@@ -1363,7 +1396,11 @@ function renderDetail() {
 
   const totalEl = document.querySelector('[data-total]');
   const form = document.querySelector('[data-booking-form]');
+  const paymentModal = document.querySelector('[data-payment-modal]');
+  const paymentForm = document.querySelector('[data-payment-form]');
   const reviewForm = document.querySelector('[data-review-form]');
+  let pendingBookingDetails = null;
+  let previousBodyOverflow = '';
   if (form && totalEl) {
     initializeBookingDatePicker(form, space);
     form.elements.time.addEventListener('input', (event) => {
@@ -1372,7 +1409,10 @@ function renderDetail() {
 
     form.addEventListener('input', () => {
       const duration = Number(form.querySelector('[name="duration"]').value || 1);
-      const seats = Number(form.querySelector('[name="seats"]').value || 1);
+      const seatsInput = form.querySelector('[name="seats"]');
+      const capacity = Math.max(1, Number(space.capacity) || 1);
+      if (Number(seatsInput.value) > capacity) seatsInput.value = String(capacity);
+      const seats = Number(seatsInput.value || 1);
       totalEl.textContent = formatPrice(space.pricePerHour * duration * seats);
     });
 
@@ -1409,7 +1449,12 @@ function renderDetail() {
       }
       const time = String(data.get('time') || '').trim();
       const duration = Number(data.get('duration')) || 1;
-      const seats = Number(data.get('seats')) || 1;
+      const seats = Number(data.get('seats'));
+      const capacity = Math.max(1, Number(space.capacity) || 1);
+      if (!Number.isInteger(seats) || seats < 1 || seats > capacity) {
+        showInlineMessage(`Количество человек не может превышать вместимость помещения: ${capacity}.`, form, 'error');
+        return;
+      }
       if (!Number.isInteger(duration) || duration < 1 || duration > 6) {
         showInlineMessage('Максимальная продолжительность бронирования — 6 часов.', form, 'error');
         return;
@@ -1431,18 +1476,119 @@ function renderDetail() {
         return;
       }
 
+      pendingBookingDetails = { date, time, duration, seats, endTime, currentUser };
+      previousBodyOverflow = document.body.style.overflow;
+      paymentModal.hidden = false;
+      document.body.style.overflow = 'hidden';
+      paymentForm.querySelector('[name="cardFirstName"]')?.focus();
+    });
+  }
+
+  if (paymentForm && paymentModal) {
+    const cardNumberInput = paymentForm.querySelector('[name="cardNumber"]');
+    const cardExpiryInput = paymentForm.querySelector('[name="cardExpiry"]');
+    const cardCvcInput = paymentForm.querySelector('[name="cardCvc"]');
+    const closePaymentModal = () => {
+      paymentModal.hidden = true;
+      document.body.style.overflow = previousBodyOverflow;
+      pendingBookingDetails = null;
+      paymentForm.reset();
+    };
+
+    cardNumberInput?.addEventListener('input', () => {
+      const cursor = cardNumberInput.selectionStart || 0;
+      const digitsBeforeCursor = cardNumberInput.value.slice(0, cursor).replace(/\D/g, '').length;
+      const digits = cardNumberInput.value.replace(/\D/g, '').slice(0, 16);
+      const formatted = (digits.match(/.{1,4}/g) || []).join(' ');
+      cardNumberInput.value = formatted;
+      let nextCursor = 0;
+      let digitsSeen = 0;
+      while (nextCursor < formatted.length && digitsSeen < digitsBeforeCursor) {
+        if (/\d/.test(formatted[nextCursor])) digitsSeen += 1;
+        nextCursor += 1;
+      }
+      if (formatted[nextCursor] === ' ' && digitsBeforeCursor > 0) nextCursor += 1;
+      cardNumberInput.setSelectionRange(nextCursor, nextCursor);
+    });
+
+    cardExpiryInput?.addEventListener('input', () => {
+      const cursor = cardExpiryInput.selectionStart || 0;
+      const digitsBeforeCursor = cardExpiryInput.value.slice(0, cursor).replace(/\D/g, '').length;
+      const digits = cardExpiryInput.value.replace(/\D/g, '').slice(0, 4);
+      const formatted = digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : digits;
+      cardExpiryInput.value = formatted;
+      let nextCursor = 0;
+      let digitsSeen = 0;
+      while (nextCursor < formatted.length && digitsSeen < digitsBeforeCursor) {
+        if (/\d/.test(formatted[nextCursor])) digitsSeen += 1;
+        nextCursor += 1;
+      }
+      if (formatted[nextCursor] === '/' && digitsBeforeCursor >= 2) nextCursor += 1;
+      cardExpiryInput.setSelectionRange(nextCursor, nextCursor);
+    });
+
+    cardCvcInput?.addEventListener('input', () => {
+      cardCvcInput.value = cardCvcInput.value.replace(/\D/g, '').slice(0, 3);
+    });
+
+    paymentModal.querySelectorAll('[data-payment-close]').forEach((button) => {
+      button.addEventListener('click', closePaymentModal);
+    });
+    paymentModal.addEventListener('click', (event) => {
+      if (event.target === paymentModal) closePaymentModal();
+    });
+    paymentModal.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') closePaymentModal();
+    });
+
+    paymentForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!pendingBookingDetails) return;
+
+      const data = new FormData(paymentForm);
+      const cardholder = String(data.get('cardholder') || '').trim();
+      const cardNumber = String(data.get('cardNumber') || '').replace(/\D/g, '');
+      const cardExpiry = String(data.get('cardExpiry') || '').trim();
+      const cardCvc = String(data.get('cardCvc') || '').trim();
+      const expiryMatch = cardExpiry.match(/^(0[1-9]|1[0-2])\/(\d{2})$/);
+      if (!cardholder || cardNumber.length !== 16
+        || !expiryMatch || !/^\d{3}$/.test(cardCvc)) {
+        showInlineMessage('Проверьте номер карты, срок действия и CVC.', paymentForm, 'error');
+        return;
+      }
+      const expiryMonth = Number(expiryMatch[1]);
+      const expiryYear = 2000 + Number(expiryMatch[2]);
+      const currentDate = new Date();
+      if (expiryYear < currentDate.getFullYear()
+        || (expiryYear === currentDate.getFullYear() && expiryMonth < currentDate.getMonth() + 1)) {
+        showInlineMessage('Срок действия карты уже истёк.', paymentForm, 'error');
+        return;
+      }
+
+      const { date, time, duration, seats, endTime, currentUser } = pendingBookingDetails;
       const booking = {
         id: `booking_${Date.now()}`,
         userId: currentUser.id,
+        userName: currentUser.name || '',
+        userEmail: String(window.firebase?.auth?.().currentUser?.email || currentUser.email || '').trim(),
         workspaceId: space.id,
+        workspaceTitle: space.title,
+        city: space.city || '',
+        address: space.address || 'Адрес не указан',
         date,
         timeSlot: `${time} - ${endTime}`,
         duration,
-        status: 'pending',
+        status: 'confirmed',
+        paymentStatus: 'paid',
+        paymentMethod: 'fake-card',
+        cardLast4: cardNumber.slice(-4),
+        paidAt: new Date().toISOString(),
         amount: space.pricePerHour * duration * seats,
         seats,
         createdAt: new Date().toISOString()
       };
+      const submitButton = paymentForm.querySelector('[type="submit"]');
+      submitButton.disabled = true;
       try {
         if (CoworkingDB.isReady()) {
           await CoworkingDB.createBooking(booking);
@@ -1453,14 +1599,23 @@ function renderDetail() {
           saveJson(STORAGE_KEYS.activeBookings, [booking, ...getActiveBookings()]);
           const spaces = getSpaces().map((item) => (
             item.id === space.id
-              ? { ...item, bookedDates: [...new Set([...(item.bookedDates || []), date])] }
+              ? {
+                ...item,
+                status: 'booked',
+                lastBookingId: booking.id,
+                bookedDates: [...new Set([...(item.bookedDates || []), date])]
+              }
               : item
           ));
           saveJson(STORAGE_KEYS.spaces, spaces);
         }
         window.location.href = 'bookings.html';
       } catch (error) {
-        showInlineMessage(`Не удалось создать бронирование: ${error.message}`, form, 'error');
+        submitButton.disabled = false;
+        const message = error.code === 'permission-denied'
+          ? 'Firebase отклонил запись. Проверьте совпадение email аккаунта и опубликованных правил Firestore (firebase deploy --only firestore:rules).'
+          : error.message;
+        showInlineMessage(`Не удалось оформить оплату и бронь: ${message}`, paymentForm, 'error');
       }
     });
   }
@@ -2133,8 +2288,9 @@ function renderAdmin() {
     <div class="admin-grid">
       <div class="stat-card"><strong>${formatNumber(spaces.length)}</strong> рабочих зон</div>
       <div class="stat-card"><strong>${formatNumber(bookings.filter((b) => b.status === 'confirmed').length)}</strong> подтверждено</div>
-      <div class="stat-card"><strong>${formatNumber(bookings.filter((b) => b.status === 'pending').length)}</strong> ожидает</div>
-      <div class="stat-card"><strong>${formatNumber(bookings.reduce((sum, item) => sum + (Number(item.amount) || 0), 0))}</strong> оборот</div>
+      <div class="stat-card"><strong>${formatNumber(bookings.reduce((sum, item) => (
+        item.status === 'confirmed' ? sum + (Number(item.amount) || 0) : sum
+      ), 0))}</strong> оборот</div>
     </div>
     <div class="admin-sections">
       <div class="form-box">
@@ -2376,9 +2532,36 @@ function renderAdmin() {
       const status = document.querySelector(`[data-booking-status="${bookingId}"]`)?.value;
       if (!status) return;
       try {
-        await CoworkingDB.updateBookingStatus(bookingId, status);
-        const updated = getBookings().map((booking) => booking.id === bookingId ? { ...booking, status } : booking);
+        if (CoworkingDB.isReady()) {
+          await CoworkingDB.updateBookingStatus(bookingId, status);
+        }
+        const booking = getBookings().find((item) => item.id === bookingId);
+        const updated = getBookings().map((item) => item.id === bookingId ? { ...item, status } : item);
         saveJson(STORAGE_KEYS.bookings, updated);
+        if (booking && ['pending', 'confirmed'].includes(status)) {
+          saveJson(STORAGE_KEYS.activeBookings, [
+            { ...booking, status },
+            ...getActiveBookings().filter((item) => item.id !== bookingId)
+          ]);
+          if (status === 'confirmed') {
+            const spaces = getSpaces().map((space) => space.id === booking.workspaceId
+              ? { ...space, status: 'booked', lastBookingId: bookingId }
+              : space);
+            saveJson(STORAGE_KEYS.spaces, spaces);
+          }
+        } else if (booking) {
+          saveJson(STORAGE_KEYS.activeBookings, getActiveBookings().filter((item) => item.id !== bookingId));
+          const spaces = getSpaces().map((space) => {
+            if (space.id !== booking.workspaceId) return space;
+            const bookedDates = (space.bookedDates || []).filter((date) => date !== booking.date);
+            return {
+              ...space,
+              bookedDates,
+              ...(space.lastBookingId === bookingId ? { status: 'available' } : {})
+            };
+          });
+          saveJson(STORAGE_KEYS.spaces, spaces);
+        }
         renderAdmin();
       } catch (error) {
         showInlineMessage(`Не удалось изменить статус бронирования: ${error.message}`, root, 'error');
