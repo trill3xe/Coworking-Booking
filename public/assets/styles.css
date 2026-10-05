@@ -876,10 +876,6 @@ textarea {
   background: var(--success);
 }
 
-.small-btn.primary {
-  background: var(--primary);
-}
-
 .booking-history {
   margin-top: 1.25rem;
   overflow: hidden;

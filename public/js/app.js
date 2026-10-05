@@ -39,6 +39,8 @@ const reviewStore = {
 let adminDataLoaded = false;
 let adminDataPromise = null;
 let profileReviewUnsubscribe = null;
+let profileReviewsLoaded = true;
+let profileReviewsError = '';
 
 function resetAppStorage() {
   Object.values(STORAGE_KEYS).forEach((key) => {
@@ -265,14 +267,25 @@ function listenToProfileReviews(userId) {
     profileReviewUnsubscribe();
     profileReviewUnsubscribe = null;
   }
-  if (!userId) return;
+
+  profileReviewsLoaded = false;
+  profileReviewsError = '';
+  if (!userId) {
+    profileReviewsLoaded = true;
+    renderProfile();
+    return;
+  }
 
   profileReviewUnsubscribe = CoworkingDB.listenToReviewsByUserId(userId, (reviews) => {
     reviewStore.items = reviews;
     reviewStore.error = null;
+    profileReviewsLoaded = true;
     renderProfile();
   }, (error) => {
     console.error('Could not load user reviews:', error);
+    profileReviewsLoaded = true;
+    profileReviewsError = 'Не удалось загрузить историю действий. Попробуйте обновить страницу.';
+    renderProfile();
   });
 }
 
@@ -705,11 +718,18 @@ function initializeFirebase() {
   }
 
   if (page === 'profile') {
+    profileReviewsLoaded = false;
+    profileReviewsError = '';
     const auth = window.firebase?.auth?.();
     if (auth?.onAuthStateChanged) {
       auth.onAuthStateChanged((authUser) => {
         if (!authUser) {
-          if (currentUser) listenToProfileReviews(currentUser.id);
+          if (currentUser) {
+            listenToProfileReviews(currentUser.id);
+          } else {
+            profileReviewsLoaded = true;
+            renderProfile();
+          }
           return;
         }
 
@@ -722,6 +742,8 @@ function initializeFirebase() {
       });
     } else if (currentUser) {
       listenToProfileReviews(currentUser.id);
+    } else {
+      profileReviewsLoaded = true;
     }
   }
 
@@ -1885,6 +1907,24 @@ function renderProfile() {
     createdAt: review.createdAt,
     body: String(review.comment || '').trim() || 'Без комментария'
   }));
+  const historyContent = !profileReviewsLoaded
+    ? '<div class="empty-state">История действий загружается, подождите...</div>'
+    : profileReviewsError
+      ? `<div class="empty-state">${escapeHtml(profileReviewsError)}</div>`
+      : combinedHistory.length
+        ? combinedHistory.map((entry) => `
+            <article class="history-item">
+              <h4>${entry.title}</h4>
+              <p><strong>${entry.subtitle}</strong></p>
+              <p${entry.body === 'Без комментария' ? ' class="muted"' : ''}>${escapeHtml(entry.body)}</p>
+              <div class="history-actions" style="margin-top: 0.7rem; display: flex; gap: 0.5rem;">
+                <button class="small-btn" data-edit-review="${entry.id}">Редактировать</button>
+                <button class="small-btn danger" data-delete-review="${entry.id}">Удалить</button>
+              </div>
+              <small class="muted">${formatDate(entry.createdAt)}</small>
+            </article>
+          `).join('')
+        : '<div class="empty-state">История пуста.</div>';
 
   root.innerHTML = `
     <div class="profile-layout">
@@ -1907,18 +1947,7 @@ function renderProfile() {
       <section>
         <h2>История действий</h2>
         <div class="history-list">
-          ${combinedHistory.length ? combinedHistory.map((entry) => `
-            <article class="history-item">
-              <h4>${entry.title}</h4>
-              <p><strong>${entry.subtitle}</strong></p>
-              <p${entry.body === 'Без комментария' ? ' class="muted"' : ''}>${escapeHtml(entry.body)}</p>
-              <div class="history-actions" style="margin-top: 0.7rem; display: flex; gap: 0.5rem;">
-                <button class="small-btn" data-edit-review="${entry.id}">Редактировать</button>
-                <button class="small-btn danger" data-delete-review="${entry.id}">Удалить</button>
-              </div>
-              <small class="muted">${formatDate(entry.createdAt)}</small>
-            </article>
-          `).join('') : '<div class="empty-state">История пуста.</div>'}
+          ${historyContent}
         </div>
       </section>
     </div>
