@@ -273,11 +273,21 @@ service cloud.firestore {
       allow update: if signedIn()
         && (
           isAdmin()
-          || request.auth.uid == resource.data.userId
-          || isLegacyOwner(resource.data.userId)
+          || (
+            (request.auth.uid == resource.data.userId || isLegacyOwner(resource.data.userId))
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating', 'comment', 'updatedAt'])
+          )
+          || (
+            isLegacyOwner(resource.data.userId)
+            && request.resource.data.userId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['userId'])
+          )
         )
-        && (isAdmin() || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating', 'comment', 'updatedAt']))
-        && request.resource.data.userId == resource.data.userId
+        && (
+          isAdmin()
+          || request.resource.data.userId == resource.data.userId
+          || (isLegacyOwner(resource.data.userId) && request.resource.data.userId == request.auth.uid)
+        )
         && request.resource.data.userName == resource.data.userName
         && request.resource.data.workspaceId == resource.data.workspaceId
         && request.resource.data.comment is string
