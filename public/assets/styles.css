@@ -864,11 +864,12 @@ textarea {
 
 .small-btn {
   border: none;
-  background: var(--danger);
-  color: white;
+  background: yellow;
+  color: black;
   border-radius: 10px;
-  padding: 5px;
+  padding: 7px;
   cursor: pointer;
+  font-weight: 600;
 }
 
 .small-btn.success {

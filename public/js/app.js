@@ -38,6 +38,7 @@ const reviewStore = {
 
 let adminDataLoaded = false;
 let adminDataPromise = null;
+let profileReviewUnsubscribe = null;
 
 function resetAppStorage() {
   Object.values(STORAGE_KEYS).forEach((key) => {
@@ -203,9 +204,7 @@ function getActiveAuthUid() {
   return auth?.currentUser?.uid || getCurrentUser()?.id || null;
 }
 
-async function syncReviewOwnerIds() {
-  const auth = window.firebase?.auth?.();
-  const user = auth?.currentUser;
+async function syncReviewOwnerIds(user = window.firebase?.auth?.()?.currentUser) {
   if (!user || !window.firebase || !window.firebase.firestore) return;
 
   const db = window.firebase.firestore();
@@ -222,19 +221,26 @@ async function syncReviewOwnerIds() {
     createdAt: localUser?.createdAt || new Date().toISOString()
   }, { merge: true });
 
-  const reviewsSnapshot = await db.collection('reviews')
-    .where('userName', '==', profileName)
-    .get();
-
-  await Promise.all(reviewsSnapshot.docs.map((doc) => {
-    const reviewData = doc.data();
-    if (reviewData.userId !== user.uid) {
-      return doc.ref.update({ userId: user.uid });
-    }
-    return Promise.resolve();
-  }));
-
   const localUsers = JSON.parse(localStorage.getItem('coworking_users') || '[]');
+  const authEmail = String(user.email || '').trim().toLowerCase();
+  const legacyUserIds = [...new Set(localUsers
+    .filter((item) => authEmail
+      && item.id !== user.uid
+      && String(item.email || '').trim().toLowerCase() === authEmail)
+    .map((item) => item.id)
+    .filter(Boolean))];
+
+  const legacyReviewSnapshots = await Promise.all(legacyUserIds.map((legacyUserId) => (
+    db.collection('reviews').where('userId', '==', legacyUserId).get()
+  )));
+  const legacyReviewDocs = new Map();
+  legacyReviewSnapshots.forEach((snapshot) => {
+    snapshot.docs.forEach((doc) => legacyReviewDocs.set(doc.id, doc));
+  });
+
+  await Promise.allSettled([...legacyReviewDocs.values()].map((doc) => (
+    doc.ref.update({ userId: user.uid })
+  )));
   const existing = localUsers.find((item) => item.id === user.uid);
   if (!existing) {
     localUsers.push({
@@ -252,6 +258,22 @@ async function syncReviewOwnerIds() {
 
   localStorage.setItem('coworking_users', JSON.stringify(localUsers));
   localStorage.setItem('coworking_current_user', user.uid);
+}
+
+function listenToProfileReviews(userId) {
+  if (profileReviewUnsubscribe) {
+    profileReviewUnsubscribe();
+    profileReviewUnsubscribe = null;
+  }
+  if (!userId) return;
+
+  profileReviewUnsubscribe = CoworkingDB.listenToReviewsByUserId(userId, (reviews) => {
+    reviewStore.items = reviews;
+    reviewStore.error = null;
+    renderProfile();
+  }, (error) => {
+    console.error('Could not load user reviews:', error);
+  });
 }
 
 function isAdmin() {
@@ -682,14 +704,25 @@ function initializeFirebase() {
     });
   }
 
-  if (page === 'profile' && currentUser) {
-    CoworkingDB.listenToReviewsByUserId(currentUser.id, (reviews) => {
-      reviewStore.items = reviews;
-      reviewStore.error = null;
-      renderProfile();
-    }, (error) => {
-      console.error('Could not load user reviews:', error);
-    });
+  if (page === 'profile') {
+    const auth = window.firebase?.auth?.();
+    if (auth?.onAuthStateChanged) {
+      auth.onAuthStateChanged((authUser) => {
+        if (!authUser) {
+          if (currentUser) listenToProfileReviews(currentUser.id);
+          return;
+        }
+
+        syncReviewOwnerIds(authUser)
+          .catch((error) => console.warn('Review owner sync warning:', error))
+          .finally(() => {
+            listenToProfileReviews(authUser.uid);
+            renderProfile();
+          });
+      });
+    } else if (currentUser) {
+      listenToProfileReviews(currentUser.id);
+    }
   }
 
   if (page === 'admin' && currentUser?.role === 'admin') {
@@ -852,7 +885,7 @@ function buildSpaceCard(space) {
           <span class="muted">${rating ? `★ ${rating.toFixed(1)}` : 'Нет оценок'}</span>
         </div>
         <h3>${space.title}</h3>
-        <p>${space.city || ''} · до ${formatCapacity(space.capacity)}</p>
+        <p>${space.country || 'Казахстан'}, ${space.city} · до ${formatCapacity(space.capacity)}</p>
         <div class="feature-list">
           ${features.slice(0, 3).map((feature) => `<span class="feature-tag">${feature}</span>`).join('')}
         </div>
@@ -1480,7 +1513,7 @@ function renderDetail() {
       previousBodyOverflow = document.body.style.overflow;
       paymentModal.hidden = false;
       document.body.style.overflow = 'hidden';
-      paymentForm.querySelector('[name="cardFirstName"]')?.focus();
+      paymentForm.querySelector('[name="cardholder"]')?.focus();
     });
   }
 
@@ -1841,16 +1874,16 @@ function renderProfile() {
 
   const authUid = getActiveAuthUid();
   const reviews = getStoredReviews()
-    .filter((review) => review.userId === authUid && String(review.comment || '').trim())
+    .filter((review) => review.userId === authUid)
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
   const combinedHistory = reviews.map((review) => ({
     type: 'review',
     id: review.id,
-    title: `Комментарий · ${getSpaces().find((item) => item.id === review.workspaceId)?.title || 'Рабочее место'}`,
+    title: `${String(review.comment || '').trim() ? 'Комментарий' : 'Отзыв'} · ${getSpaces().find((item) => item.id === review.workspaceId)?.title || 'Рабочее место'}`,
     subtitle: `Оценка: ${review.rating}/5`,
     createdAt: review.createdAt,
-    body: review.comment
+    body: String(review.comment || '').trim() || 'Без комментария'
   }));
 
   root.innerHTML = `
@@ -1878,7 +1911,7 @@ function renderProfile() {
             <article class="history-item">
               <h4>${entry.title}</h4>
               <p><strong>${entry.subtitle}</strong></p>
-              <p>${escapeHtml(entry.body)}</p>
+              <p${entry.body === 'Без комментария' ? ' class="muted"' : ''}>${escapeHtml(entry.body)}</p>
               <div class="history-actions" style="margin-top: 0.7rem; display: flex; gap: 0.5rem;">
                 <button class="small-btn" data-edit-review="${entry.id}">Редактировать</button>
                 <button class="small-btn danger" data-delete-review="${entry.id}">Удалить</button>
@@ -2721,7 +2754,6 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   if (page === 'profile.html' || page === 'profile') {
-    syncReviewOwnerIds().catch((error) => console.warn('Review owner sync warning:', error));
     renderProfile();
   }
 
