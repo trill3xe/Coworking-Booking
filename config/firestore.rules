@@ -56,7 +56,7 @@ service cloud.firestore {
       return existsAfter(bookingPath(bookingId))
         && getAfter(bookingPath(bookingId)).data.userId == request.auth.uid
         && getAfter(bookingPath(bookingId)).data.workspaceId == spaceId
-        && getAfter(bookingPath(bookingId)).data.status in ['cancelled', 'expired'];
+        && getAfter(bookingPath(bookingId)).data.status in ['cancelled', 'completed', 'expired'];
     }
 
     match /users/{userId} {
@@ -99,6 +99,60 @@ service cloud.firestore {
               && request.resource.data.status == 'booked'
               && request.resource.data.lastBookingId == request.resource.data.bookingDateChange.bookingId
               && getAfter(bookingPath(request.resource.data.bookingDateChange.bookingId)).data.status == 'confirmed'
+            )
+          )
+        )
+        || (
+          signedIn()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['bookingSlots', 'bookingSlotChange', 'updatedAt'])
+          && request.resource.data.bookingSlots is map
+          && request.resource.data.bookingSlotChange.action == 'reserve'
+          && request.resource.data.bookingSlotChange.bookingId is string
+          && request.resource.data.bookingSlotChange.date is string
+          && request.resource.data.bookingSlotChange.startMinutes is int
+          && request.resource.data.bookingSlotChange.endMinutes is int
+          && request.resource.data.bookingSlotChange.startMinutes >= 0
+          && request.resource.data.bookingSlotChange.endMinutes <= 1440
+          && request.resource.data.bookingSlotChange.endMinutes > request.resource.data.bookingSlotChange.startMinutes
+          && ownsActiveBookingAfter(request.resource.data.bookingSlotChange.bookingId, spaceId)
+          && getAfter(bookingPath(request.resource.data.bookingSlotChange.bookingId)).data.date == request.resource.data.bookingSlotChange.date
+          && getAfter(bookingPath(request.resource.data.bookingSlotChange.bookingId)).data.startMinutes == request.resource.data.bookingSlotChange.startMinutes
+          && getAfter(bookingPath(request.resource.data.bookingSlotChange.bookingId)).data.endMinutes == request.resource.data.bookingSlotChange.endMinutes
+          && getAfter(activeBookingPath(request.resource.data.bookingSlotChange.bookingId)).data.startMinutes == request.resource.data.bookingSlotChange.startMinutes
+          && getAfter(activeBookingPath(request.resource.data.bookingSlotChange.bookingId)).data.endMinutes == request.resource.data.bookingSlotChange.endMinutes
+          && request.resource.data.bookingSlots.keys().hasAll(resource.data.get('bookingSlots', {}).keys())
+          && request.resource.data.bookingSlots.keys().size() == resource.data.get('bookingSlots', {}).keys().size() + 1
+          && request.resource.data.bookingSlots.keys().hasAny([request.resource.data.bookingSlotChange.bookingId])
+          && !resource.data.get('bookingSlots', {}).keys().hasAny([request.resource.data.bookingSlotChange.bookingId])
+          && request.resource.data.bookingSlots.diff(resource.data.get('bookingSlots', {})).affectedKeys().hasOnly([request.resource.data.bookingSlotChange.bookingId])
+          && request.resource.data.bookingSlots.get(request.resource.data.bookingSlotChange.bookingId, {}).get('date', '') == request.resource.data.bookingSlotChange.date
+          && request.resource.data.bookingSlots.get(request.resource.data.bookingSlotChange.bookingId, {}).get('startMinutes', -1) == request.resource.data.bookingSlotChange.startMinutes
+          && request.resource.data.bookingSlots.get(request.resource.data.bookingSlotChange.bookingId, {}).get('endMinutes', -1) == request.resource.data.bookingSlotChange.endMinutes
+        )
+        || (
+          signedIn()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['bookingSlots', 'bookingSlotChange', 'updatedAt'])
+          && request.resource.data.bookingSlots is map
+          && request.resource.data.bookingSlotChange.action in ['release', 'orphan-release']
+          && request.resource.data.bookingSlotChange.bookingId is string
+          && request.resource.data.bookingSlotChange.date is string
+          && ownsActiveBookingBefore(request.resource.data.bookingSlotChange.bookingId, spaceId)
+          && resource.data.get('bookingSlots', {}).keys().hasAny([request.resource.data.bookingSlotChange.bookingId])
+          && !request.resource.data.bookingSlots.keys().hasAny([request.resource.data.bookingSlotChange.bookingId])
+          && resource.data.get('bookingSlots', {}).keys().size() == request.resource.data.bookingSlots.keys().size() + 1
+          && resource.data.get('bookingSlots', {}).diff(request.resource.data.bookingSlots).affectedKeys().hasOnly([request.resource.data.bookingSlotChange.bookingId])
+          && resource.data.get('bookingSlots', {}).get(request.resource.data.bookingSlotChange.bookingId, {}).get('date', '') == request.resource.data.bookingSlotChange.date
+          && get(activeBookingPath(request.resource.data.bookingSlotChange.bookingId)).data.date == request.resource.data.bookingSlotChange.date
+          && !existsAfter(activeBookingPath(request.resource.data.bookingSlotChange.bookingId))
+          && (
+            (
+              request.resource.data.bookingSlotChange.action == 'release'
+              && existsAfter(bookingPath(request.resource.data.bookingSlotChange.bookingId))
+              && getAfter(bookingPath(request.resource.data.bookingSlotChange.bookingId)).data.status in ['cancelled', 'completed', 'expired']
+            )
+            || (
+              request.resource.data.bookingSlotChange.action == 'orphan-release'
+              && !existsAfter(bookingPath(request.resource.data.bookingSlotChange.bookingId))
             )
           )
         )

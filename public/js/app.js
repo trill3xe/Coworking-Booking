@@ -334,6 +334,46 @@ function getBookingTimeRange(booking) {
   return { start, end };
 }
 
+function getTimeSlotMinuteRange(timeSlot) {
+  const match = String(timeSlot || '').match(/^([01]\d|2[0-3]):([0-5]\d)\s*-\s*([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!match) return null;
+
+  const [, startHour, startMinute, endHour, endMinute] = match;
+  return {
+    startMinutes: Number(startHour) * 60 + Number(startMinute),
+    endMinutes: Number(endHour) * 60 + Number(endMinute)
+  };
+}
+
+function getSpaceBookingSlots(space) {
+  return space?.bookingSlots && typeof space.bookingSlots === 'object' && !Array.isArray(space.bookingSlots)
+    ? space.bookingSlots
+    : {};
+}
+
+function isLegacyBookingDateUnavailable(space, date) {
+  if (!(space.bookedDates || []).includes(date)) return false;
+  return !Object.values(getSpaceBookingSlots(space)).some((slot) => slot.date === date);
+}
+
+function getBookingTimeConflicts(space, date, startMinutes, endMinutes) {
+  return Object.values(getSpaceBookingSlots(space)).filter((slot) => {
+    if (slot.date !== date) return false;
+    if (!Number.isInteger(slot.startMinutes) || !Number.isInteger(slot.endMinutes)) return true;
+
+    const now = new Date();
+    const today = toLocalDateString(now);
+    if (slot.date === today && slot.endMinutes <= now.getHours() * 60 + now.getMinutes()) return false;
+
+    return startMinutes < slot.endMinutes && endMinutes > slot.startMinutes;
+  });
+}
+
+function formatBookingTime(minutes) {
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 24 * 60) return null;
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
 function isBookingExpired(booking) {
   if (!booking || ['cancelled', 'completed', 'expired'].includes(booking.status)) return false;
   const range = getBookingTimeRange(booking);
@@ -369,7 +409,7 @@ async function synchronizeExpiredBookings() {
     )));
     saveJson(STORAGE_KEYS.activeBookings, getActiveBookings().filter((item) => item.id !== booking.id));
     if (!booking.workspaceId) return;
-    removeLocalBookedDate(booking.workspaceId, booking.date);
+    removeLocalBookedDate(booking.workspaceId, booking.date, booking.id);
     const space = getSpaces().find((item) => item.id === booking.workspaceId);
     if (space?.lastBookingId === booking.id) setLocalSpaceStatus(booking.workspaceId, 'available');
   };
@@ -410,7 +450,7 @@ async function reconcileOrphanedActiveBookings(activeBookings = getActiveBooking
 
       saveJson(STORAGE_KEYS.bookings, getBookings().filter((item) => item.id !== activeBooking.id));
       saveJson(STORAGE_KEYS.activeBookings, getActiveBookings().filter((item) => item.id !== activeBooking.id));
-      removeLocalBookedDate(activeBooking.workspaceId, activeBooking.date);
+      removeLocalBookedDate(activeBooking.workspaceId, activeBooking.date, activeBooking.id);
       const space = getSpaces().find((item) => item.id === activeBooking.workspaceId);
       if (space?.lastBookingId === activeBooking.id) setLocalSpaceStatus(activeBooking.workspaceId, 'available');
       renderCatalog();
@@ -432,19 +472,32 @@ function setLocalSpaceStatus(spaceId, status) {
   saveJson(STORAGE_KEYS.spaces, spaces);
 }
 
-function removeLocalBookedDate(spaceId, date) {
+function removeLocalBookedDate(spaceId, date, bookingId) {
   if (!date) return;
-  const spaces = getSpaces().map((space) => (
-    space.id === spaceId
-      ? { ...space, bookedDates: (space.bookedDates || []).filter((bookedDate) => bookedDate !== date) }
-      : space
+  const remainingActiveOnDate = getActiveBookings().some((booking) => (
+    String(booking.workspaceId) === String(spaceId) && booking.date === date
   ));
+  const spaces = getSpaces().map((space) => {
+    if (String(space.id) !== String(spaceId)) return space;
+
+    const bookingSlots = { ...getSpaceBookingSlots(space) };
+    if (bookingId) delete bookingSlots[bookingId];
+    const hasTimedSlotOnDate = Object.values(bookingSlots).some((slot) => slot.date === date);
+    const bookedDates = remainingActiveOnDate || hasTimedSlotOnDate
+      ? (space.bookedDates || [])
+      : (space.bookedDates || []).filter((bookedDate) => bookedDate !== date);
+
+    return { ...space, bookingSlots, bookedDates };
+  });
   saveJson(STORAGE_KEYS.spaces, spaces);
 }
 
-async function releaseSpace(spaceId, date) {
-  removeLocalBookedDate(spaceId, date);
-  setLocalSpaceStatus(spaceId, 'available');
+async function releaseSpace(spaceId, date, bookingId) {
+  removeLocalBookedDate(spaceId, date, bookingId);
+  const space = getSpaces().find((item) => String(item.id) === String(spaceId));
+  if (space?.lastBookingId === bookingId || !getActiveBookings().some((booking) => String(booking.workspaceId) === String(spaceId))) {
+    setLocalSpaceStatus(spaceId, 'available');
+  }
   if (window.CoworkingDB?.isReady?.() && window.CoworkingDB.updateSpaceStatus) {
     try {
       await window.CoworkingDB.updateSpaceStatus(spaceId, 'available');
@@ -552,14 +605,13 @@ function initializeBookingDatePicker(form, space) {
   today.setHours(0, 0, 0, 0);
   const maximumDate = addDays(today, 14);
   const maximumMonth = new Date(maximumDate.getFullYear(), maximumDate.getMonth(), 1);
+  const bookingSlots = getSpaceBookingSlots(space);
   const manuallyUnavailable = space.status === 'booked'
-    && (!Array.isArray(space.bookedDates) || space.bookedDates.length === 0);
-  const reservedDates = new Set([
-    ...(Array.isArray(space.bookedDates) ? space.bookedDates : []),
-    ...getActiveBookings()
-      .filter((booking) => String(booking.workspaceId) === String(space.id))
-      .map((booking) => booking.date)
-  ]);
+    && (!Array.isArray(space.bookedDates) || space.bookedDates.length === 0)
+    && Object.keys(bookingSlots).length === 0;
+  const reservedDates = new Set((space.bookedDates || []).filter((date) => (
+    isLegacyBookingDateUnavailable(space, date)
+  )));
   let selectedDate = new Date(today);
   let visibleMonth = new Date(today.getFullYear(), today.getMonth(), 1);
 
@@ -1492,12 +1544,11 @@ function renderDetail() {
         showInlineMessage('Можно выбрать дату не раньше сегодня и не более чем на 14 дней вперёд.', form, 'error');
         return;
       }
-      const isDateReserved = (space.status === 'booked'
-        && (!Array.isArray(space.bookedDates) || space.bookedDates.length === 0))
-        || (space.bookedDates || []).includes(date)
-        || getActiveBookings().some((booking) => (
-          String(booking.workspaceId) === String(space.id) && booking.date === date
-        ));
+      const bookingSlots = getSpaceBookingSlots(space);
+      const isManuallyUnavailable = space.status === 'booked'
+        && (!Array.isArray(space.bookedDates) || space.bookedDates.length === 0)
+        && Object.keys(bookingSlots).length === 0;
+      const isDateReserved = isManuallyUnavailable || isLegacyBookingDateUnavailable(space, date);
       if (isDateReserved) {
         showInlineMessage('На эту дату уже есть бронирование. Выберите другой день.', form, 'error');
         return;
@@ -1524,6 +1575,27 @@ function renderDetail() {
         showInlineMessage('Выберите время, чтобы бронирование закончилось до полуночи.', form, 'error');
         return;
       }
+      const startMinutes = startHour * 60 + startMinute;
+      if (date === toLocalDateString(today)
+        && startMinutes <= new Date().getHours() * 60 + new Date().getMinutes()) {
+        showInlineMessage('Выберите время позже текущего.', form, 'error');
+        return;
+      }
+      const timeConflicts = getBookingTimeConflicts(space, date, startMinutes, endMinutes);
+      if (timeConflicts.length) {
+        const occupiedTimes = timeConflicts
+          .map((slot) => {
+            const start = formatBookingTime(slot.startMinutes);
+            const end = formatBookingTime(slot.endMinutes);
+            return start && end ? `${start}–${end}` : null;
+          })
+          .filter(Boolean);
+        const message = occupiedTimes.length
+          ? `Занято: ${occupiedTimes.join(', ')}. Выберите другое время.`
+          : 'Это время уже занято. Выберите другой интервал.';
+        showInlineMessage(message, form, 'error');
+        return;
+      }
       const endTime = `${String(Math.floor(endMinutes / 60)).padStart(2, '0')}:${String(endMinutes % 60).padStart(2, '0')}`;
       const currentUser = getCurrentUser();
       if (!currentUser) {
@@ -1531,7 +1603,7 @@ function renderDetail() {
         return;
       }
 
-      pendingBookingDetails = { date, time, duration, seats, endTime, currentUser };
+      pendingBookingDetails = { date, time, duration, seats, endTime, startMinutes, endMinutes, currentUser };
       previousBodyOverflow = document.body.style.overflow;
       paymentModal.hidden = false;
       document.body.style.overflow = 'hidden';
@@ -1620,7 +1692,7 @@ function renderDetail() {
         return;
       }
 
-      const { date, time, duration, seats, endTime, currentUser } = pendingBookingDetails;
+      const { date, time, duration, seats, endTime, startMinutes, endMinutes, currentUser } = pendingBookingDetails;
       const booking = {
         id: `booking_${Date.now()}`,
         userId: currentUser.id,
@@ -1632,6 +1704,8 @@ function renderDetail() {
         address: space.address || 'Адрес не указан',
         date,
         timeSlot: `${time} - ${endTime}`,
+        startMinutes,
+        endMinutes,
         duration,
         status: 'confirmed',
         paymentStatus: 'paid',
@@ -1656,9 +1730,10 @@ function renderDetail() {
             item.id === space.id
               ? {
                 ...item,
-                status: 'booked',
-                lastBookingId: booking.id,
-                bookedDates: [...new Set([...(item.bookedDates || []), date])]
+                bookingSlots: {
+                  ...getSpaceBookingSlots(item),
+                  [booking.id]: { date, startMinutes, endMinutes }
+                }
               }
               : item
           ));
@@ -1822,7 +1897,7 @@ function renderBookings() {
         } else {
           saveJson(STORAGE_KEYS.bookings, getBookings().filter((item) => item.id !== bookingId));
           saveJson(STORAGE_KEYS.activeBookings, getActiveBookings().filter((item) => item.id !== bookingId));
-          removeLocalBookedDate(booking.workspaceId, booking.date);
+          removeLocalBookedDate(booking.workspaceId, booking.date, bookingId);
           const space = getSpaces().find((item) => item.id === booking.workspaceId);
           if (space?.lastBookingId === bookingId) setLocalSpaceStatus(booking.workspaceId, 'available');
         }
@@ -1847,7 +1922,11 @@ function renderBookings() {
             : item);
           saveJson(STORAGE_KEYS.bookings, bookingsList);
           saveJson(STORAGE_KEYS.activeBookings, getActiveBookings().filter((item) => item.id !== bookingId));
-          if (booking?.workspaceId) await releaseSpace(booking.workspaceId, booking.date);
+          if (booking?.workspaceId) {
+            removeLocalBookedDate(booking.workspaceId, booking.date, bookingId);
+            const space = getSpaces().find((item) => item.id === booking.workspaceId);
+            if (space?.lastBookingId === bookingId) setLocalSpaceStatus(booking.workspaceId, 'available');
+          }
           renderBookings();
         }
 
@@ -2613,16 +2692,9 @@ function renderAdmin() {
           }
         } else if (booking) {
           saveJson(STORAGE_KEYS.activeBookings, getActiveBookings().filter((item) => item.id !== bookingId));
-          const spaces = getSpaces().map((space) => {
-            if (space.id !== booking.workspaceId) return space;
-            const bookedDates = (space.bookedDates || []).filter((date) => date !== booking.date);
-            return {
-              ...space,
-              bookedDates,
-              ...(space.lastBookingId === bookingId ? { status: 'available' } : {})
-            };
-          });
-          saveJson(STORAGE_KEYS.spaces, spaces);
+          removeLocalBookedDate(booking.workspaceId, booking.date, bookingId);
+          const space = getSpaces().find((item) => item.id === booking.workspaceId);
+          if (space?.lastBookingId === bookingId) setLocalSpaceStatus(booking.workspaceId, 'available');
         }
         renderAdmin();
       } catch (error) {
@@ -2653,7 +2725,7 @@ function renderAdmin() {
             : item);
           saveJson(STORAGE_KEYS.bookings, updated);
           saveJson(STORAGE_KEYS.activeBookings, getActiveBookings().filter((item) => item.id !== bookingId));
-          if (booking.workspaceId) await releaseSpace(booking.workspaceId, booking.date);
+          if (booking.workspaceId) await releaseSpace(booking.workspaceId, booking.date, bookingId);
         }
         renderAdmin();
         renderBookings();

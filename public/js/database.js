@@ -497,6 +497,39 @@ let firestore = null;
     })[character]);
   }
 
+  function getBookingSlotTimes(booking) {
+    const match = String(booking.timeSlot || '').match(/^(\d{2}):(\d{2})\s*-\s*(\d{2}):(\d{2})$/);
+    if (!match) return null;
+    const [, startHourRaw, startMinuteRaw, endHourRaw, endMinuteRaw] = match;
+    const startHour = Number(startHourRaw);
+    const startMinute = Number(startMinuteRaw);
+    const endHour = Number(endHourRaw);
+    const endMinute = Number(endMinuteRaw);
+    if (startHour > 23 || startMinute > 59 || endHour > 24 || endMinute > 59
+      || (endHour === 24 && endMinute !== 0)) return null;
+    return {
+      startMinutes: startHour * 60 + startMinute,
+      endMinutes: endHour * 60 + endMinute
+    };
+  }
+
+  function removeBookingSlot(spaceData, bookingId, date, action) {
+    const bookingSlots = spaceData.bookingSlots && typeof spaceData.bookingSlots === 'object'
+      && !Array.isArray(spaceData.bookingSlots)
+      ? { ...spaceData.bookingSlots }
+      : {};
+    if (!Object.prototype.hasOwnProperty.call(bookingSlots, bookingId)) return null;
+    if (date && bookingSlots[bookingId].date !== date) return null;
+
+    const slotDate = bookingSlots[bookingId].date;
+    delete bookingSlots[bookingId];
+    return {
+      bookingSlots,
+      bookingSlotChange: { action, bookingId, date: slotDate },
+      updatedAt: new Date().toISOString()
+    };
+  }
+
   async function createBooking(payload) {
     const bookingId = payload.id || `booking_${Date.now()}`;
     const booking = {
@@ -528,10 +561,23 @@ let firestore = null;
       || normalizedDate !== booking.date || selectedDate < today || selectedDate > maximumDate) {
       throw new Error('Можно бронировать не раньше сегодня и не более чем на 14 дней вперёд');
     }
-    const endTimeMatch = String(booking.timeSlot || '').match(/-\s*(\d{1,2}):(\d{2})$/);
-    if (!endTimeMatch) throw new Error('Не удалось определить время окончания аренды');
-    const [, endHour, endMinute] = endTimeMatch;
-    booking.expiresAt = new Date(`${booking.date}T${String(endHour).padStart(2, '0')}:${endMinute}:00`);
+    const slotTimes = getBookingSlotTimes(booking);
+    if (!slotTimes || slotTimes.endMinutes <= slotTimes.startMinutes
+      || slotTimes.endMinutes - slotTimes.startMinutes !== duration * 60) {
+      throw new Error('Укажите корректный временной интервал бронирования');
+    }
+    booking.startMinutes = slotTimes.startMinutes;
+    booking.endMinutes = slotTimes.endMinutes;
+    const currentTime = new Date();
+    if (selectedDate.getFullYear() === currentTime.getFullYear()
+      && selectedDate.getMonth() === currentTime.getMonth()
+      && selectedDate.getDate() === currentTime.getDate()
+      && slotTimes.startMinutes <= currentTime.getHours() * 60 + currentTime.getMinutes()) {
+      throw new Error('Выберите время позже текущего');
+    }
+    const endHour = Math.floor(slotTimes.endMinutes / 60);
+    const endMinute = slotTimes.endMinutes % 60;
+    booking.expiresAt = new Date(`${booking.date}T${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(2, '0')}:00`);
     if (Number.isNaN(booking.expiresAt.getTime())) throw new Error('Некорректное время окончания аренды');
     const db = getDb();
     if (booking.status !== 'confirmed' || booking.paymentStatus !== 'paid' || booking.paymentMethod !== 'fake-card') {
@@ -576,10 +622,35 @@ let firestore = null;
       if (seats > capacity) {
         throw new Error(`В помещении максимум ${capacity} мест`);
       }
-      const bookedDates = Array.isArray(spaceData.bookedDates) ? [...spaceData.bookedDates] : [];
-      const isOccupied = spaceData.status === 'booked' && bookedDates.length === 0;
-      if (isOccupied) throw new Error('Рабочая зона уже занята');
-      if (bookedDates.includes(booking.date)) throw new Error('На эту дату уже есть бронирование');
+      const bookedDates = Array.isArray(spaceData.bookedDates) ? spaceData.bookedDates : [];
+      const bookingSlots = spaceData.bookingSlots && typeof spaceData.bookingSlots === 'object'
+        && !Array.isArray(spaceData.bookingSlots)
+        ? { ...spaceData.bookingSlots }
+        : {};
+      const isManuallyUnavailable = spaceData.status === 'booked'
+        && bookedDates.length === 0
+        && Object.keys(bookingSlots).length === 0;
+      if (isManuallyUnavailable) throw new Error('Рабочая зона уже занята');
+
+      const existingSlotsOnDate = Object.values(bookingSlots).filter((slot) => slot.date === booking.date);
+      if (bookedDates.includes(booking.date) && existingSlotsOnDate.length === 0) {
+        throw new Error('На эту дату уже есть бронирование. Выберите другой день.');
+      }
+
+      const now = new Date();
+      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+      const hasConflict = existingSlotsOnDate.some((slot) => {
+        if (!Number.isInteger(slot.startMinutes) || !Number.isInteger(slot.endMinutes)) return true;
+        if (booking.date === normalizedDate && slot.endMinutes <= nowMinutes) return false;
+        return slotTimes.startMinutes < slot.endMinutes && slotTimes.endMinutes > slot.startMinutes;
+      });
+      if (hasConflict) throw new Error('Это время уже занято. Выберите другой интервал.');
+
+      bookingSlots[bookingId] = {
+        date: booking.date,
+        startMinutes: slotTimes.startMinutes,
+        endMinutes: slotTimes.endMinutes
+      };
 
       transaction.set(bookingRef, booking);
       if (['pending', 'confirmed'].includes(booking.status)) {
@@ -589,6 +660,8 @@ let firestore = null;
           workspaceId: booking.workspaceId,
           date: booking.date,
           timeSlot: booking.timeSlot,
+          startMinutes: booking.startMinutes,
+          endMinutes: booking.endMinutes,
           duration: booking.duration,
           seats: booking.seats,
           amount: booking.amount,
@@ -596,17 +669,17 @@ let firestore = null;
           expiresAt: booking.expiresAt,
           createdAt: booking.createdAt
         });
-        const updatedBookedDates = [...bookedDates, booking.date];
-        const spaceUpdate = {
-          bookedDates: updatedBookedDates,
-          bookingDateChange: { action: 'reserve', bookingId, date: booking.date, userId: booking.userId },
+        transaction.update(spaceRef, {
+          bookingSlots,
+          bookingSlotChange: {
+            action: 'reserve',
+            bookingId,
+            date: booking.date,
+            startMinutes: booking.startMinutes,
+            endMinutes: booking.endMinutes
+          },
           updatedAt: new Date().toISOString()
-        };
-        if (booking.status === 'confirmed') {
-          spaceUpdate.status = 'booked';
-          spaceUpdate.lastBookingId = bookingId;
-        }
-        transaction.update(spaceRef, spaceUpdate);
+        });
       }
       transaction.set(mailRef, {
         to: booking.userEmail,
@@ -625,70 +698,91 @@ let firestore = null;
     const bookingRef = db.collection('bookings').doc(bookingId);
     const activeRef = db.collection('activeBookings').doc(bookingId);
     const now = new Date().toISOString();
-    const bookingSnapshot = await bookingRef.get();
-    if (!bookingSnapshot.exists) throw new Error('Бронирование не найдено');
-    const bookingData = bookingSnapshot.data();
-    const batch = db.batch();
-    batch.update(bookingRef, { status, updatedAt: now });
-    const spaceRef = db.collection('spaces').doc(String(bookingData.workspaceId));
-    const spaceSnapshot = await spaceRef.get();
 
-    if (['pending', 'confirmed'].includes(status)) {
-      batch.set(activeRef, { ...bookingData, status, updatedAt: now });
-      if (status === 'confirmed' && spaceSnapshot.exists) {
-        batch.update(spaceRef, {
-          status: 'booked',
-          lastBookingId: bookingId,
-          updatedAt: now
-        });
-      }
-    } else {
-      batch.delete(activeRef);
-      if (spaceSnapshot.exists) {
-        const spaceData = spaceSnapshot.data();
-        const spaceUpdate = { updatedAt: now };
-        const bookedDates = Array.isArray(spaceData.bookedDates) ? spaceData.bookedDates : [];
-        if (bookedDates.includes(bookingData.date)) {
-          spaceUpdate.bookedDates = bookedDates.filter((date) => date !== bookingData.date);
-          spaceUpdate.bookingDateChange = { action: 'release', bookingId, date: bookingData.date };
+    return db.runTransaction(async (transaction) => {
+      const bookingSnapshot = await transaction.get(bookingRef);
+      if (!bookingSnapshot.exists) throw new Error('Бронирование не найдено');
+      const bookingData = bookingSnapshot.data();
+      const activeSnapshot = await transaction.get(activeRef);
+      const spaceRef = db.collection('spaces').doc(String(bookingData.workspaceId));
+      const spaceSnapshot = await transaction.get(spaceRef);
+
+      transaction.update(bookingRef, { status, updatedAt: now });
+      if (['pending', 'confirmed'].includes(status)) {
+        transaction.set(activeRef, { ...bookingData, status, updatedAt: now });
+        if (status === 'confirmed' && spaceSnapshot.exists) {
+          transaction.update(spaceRef, {
+            status: 'booked',
+            lastBookingId: bookingId,
+            updatedAt: now
+          });
         }
-        if (spaceData.lastBookingId === bookingId) spaceUpdate.status = 'available';
-        if (Object.keys(spaceUpdate).length > 1) batch.update(spaceRef, spaceUpdate);
+      } else {
+        transaction.delete(activeRef);
+        if (spaceSnapshot.exists) {
+          const spaceData = spaceSnapshot.data();
+          const slotRelease = removeBookingSlot(spaceData, bookingId, bookingData.date, 'release');
+          if (slotRelease) {
+            transaction.update(spaceRef, slotRelease);
+          } else {
+            const bookedDates = Array.isArray(spaceData.bookedDates) ? spaceData.bookedDates : [];
+            if (bookedDates.includes(bookingData.date)) {
+              const spaceUpdate = {
+                bookedDates: bookedDates.filter((date) => date !== bookingData.date),
+                bookingDateChange: { action: 'release', bookingId, date: bookingData.date },
+                updatedAt: now
+              };
+              if (spaceData.lastBookingId === bookingId) spaceUpdate.status = 'available';
+              transaction.update(spaceRef, spaceUpdate);
+            }
+          }
+        }
       }
-    }
-    await batch.commit();
-    return true;
+      return true;
+    });
   }
 
   async function deleteBooking(bookingId, hideFromAdmin = false) {
     const db = getDb();
     const bookingRef = db.collection('bookings').doc(bookingId);
-    const bookingSnapshot = await bookingRef.get();
-    if (!bookingSnapshot.exists) return false;
-    const bookingData = bookingSnapshot.data();
-    const isActive = ['pending', 'confirmed'].includes(bookingData.status);
+    const activeRef = db.collection('activeBookings').doc(bookingId);
     const now = new Date().toISOString();
-    const bookingUpdate = { updatedAt: now };
-    if (isActive) bookingUpdate.status = 'cancelled';
-    if (hideFromAdmin) bookingUpdate.hiddenFromAdmin = true;
-    const batch = db.batch();
-    batch.update(bookingRef, bookingUpdate);
-    batch.delete(db.collection('activeBookings').doc(bookingId));
-    const spaceRef = db.collection('spaces').doc(String(bookingData.workspaceId));
-    const spaceSnapshot = await spaceRef.get();
-    if (spaceSnapshot.exists) {
-      const spaceData = spaceSnapshot.data();
-      const spaceUpdate = { updatedAt: now };
-      const bookedDates = Array.isArray(spaceData.bookedDates) ? spaceData.bookedDates : [];
-      if (bookedDates.includes(bookingData.date)) {
-        spaceUpdate.bookedDates = bookedDates.filter((date) => date !== bookingData.date);
-        spaceUpdate.bookingDateChange = { action: 'release', bookingId, date: bookingData.date };
+
+    return db.runTransaction(async (transaction) => {
+      const bookingSnapshot = await transaction.get(bookingRef);
+      if (!bookingSnapshot.exists) return false;
+      const bookingData = bookingSnapshot.data();
+      const activeSnapshot = await transaction.get(activeRef);
+      const isActive = ['pending', 'confirmed'].includes(bookingData.status);
+      const bookingUpdate = { updatedAt: now };
+      if (isActive) bookingUpdate.status = 'cancelled';
+      if (hideFromAdmin) bookingUpdate.hiddenFromAdmin = true;
+
+      const spaceRef = db.collection('spaces').doc(String(bookingData.workspaceId));
+      const spaceSnapshot = await transaction.get(spaceRef);
+      transaction.update(bookingRef, bookingUpdate);
+      transaction.delete(activeRef);
+
+      if (spaceSnapshot.exists) {
+        const spaceData = spaceSnapshot.data();
+        const slotRelease = removeBookingSlot(spaceData, bookingId, bookingData.date, 'release');
+        if (slotRelease) {
+          transaction.update(spaceRef, slotRelease);
+        } else {
+          const bookedDates = Array.isArray(spaceData.bookedDates) ? spaceData.bookedDates : [];
+          if (isActive && bookedDates.includes(bookingData.date)) {
+            const spaceUpdate = {
+              bookedDates: bookedDates.filter((date) => date !== bookingData.date),
+              bookingDateChange: { action: 'release', bookingId, date: bookingData.date },
+              updatedAt: now
+            };
+            if (spaceData.lastBookingId === bookingId) spaceUpdate.status = 'available';
+            transaction.update(spaceRef, spaceUpdate);
+          }
+        }
       }
-      if (spaceData.lastBookingId === bookingId) spaceUpdate.status = 'available';
-      if (Object.keys(spaceUpdate).length > 1) batch.update(spaceRef, spaceUpdate);
-    }
-    await batch.commit();
-    return true;
+      return true;
+    });
   }
 
   async function permanentlyDeleteBooking(bookingId) {
@@ -709,23 +803,28 @@ let firestore = null;
       transaction.delete(bookingRef);
       if (activeSnapshot.exists) transaction.delete(activeRef);
 
-      if (spaceSnapshot?.exists) {
+      if (spaceSnapshot?.exists && activeSnapshot.exists) {
         const spaceData = spaceSnapshot.data();
-        const activeBooking = activeSnapshot.exists ? activeSnapshot.data() : null;
-        const spaceUpdate = { updatedAt: now };
-        const bookedDates = Array.isArray(spaceData.bookedDates) ? spaceData.bookedDates : [];
-        if (activeBooking?.date && bookedDates.includes(activeBooking.date)) {
-          spaceUpdate.bookedDates = bookedDates.filter((date) => date !== activeBooking.date);
-          spaceUpdate.bookingDateChange = {
-            action: 'orphan-release',
-            bookingId,
-            date: activeBooking.date
-          };
+        const activeBooking = activeSnapshot.data();
+        const slotRelease = removeBookingSlot(spaceData, bookingId, activeBooking.date, 'orphan-release');
+        if (slotRelease) {
+          transaction.update(spaceRef, slotRelease);
+        } else {
+          const bookedDates = Array.isArray(spaceData.bookedDates) ? spaceData.bookedDates : [];
+          if (bookedDates.includes(activeBooking.date)) {
+            const spaceUpdate = {
+              bookedDates: bookedDates.filter((date) => date !== activeBooking.date),
+              bookingDateChange: {
+                action: 'orphan-release',
+                bookingId,
+                date: activeBooking.date
+              },
+              updatedAt: now
+            };
+            if (spaceData.lastBookingId === bookingId) spaceUpdate.status = 'available';
+            transaction.update(spaceRef, spaceUpdate);
+          }
         }
-        if (activeSnapshot.exists && spaceData.lastBookingId === bookingId) {
-          spaceUpdate.status = 'available';
-        }
-        if (Object.keys(spaceUpdate).length > 1) transaction.update(spaceRef, spaceUpdate);
       }
       return true;
     });
@@ -776,18 +875,25 @@ let firestore = null;
       transaction.delete(activeRef);
       if (spaceSnapshot.exists) {
         const spaceData = spaceSnapshot.data();
-        const spaceUpdate = { updatedAt: now };
-        const bookedDates = Array.isArray(spaceData.bookedDates) ? spaceData.bookedDates : [];
-        if (bookedDates.includes(activeBooking.date)) {
-          spaceUpdate.bookedDates = bookedDates.filter((date) => date !== activeBooking.date);
-          spaceUpdate.bookingDateChange = {
-            action: 'orphan-release',
-            bookingId,
-            date: activeBooking.date
-          };
+        const slotRelease = removeBookingSlot(spaceData, bookingId, activeBooking.date, 'orphan-release');
+        if (slotRelease) {
+          transaction.update(spaceRef, slotRelease);
+        } else {
+          const bookedDates = Array.isArray(spaceData.bookedDates) ? spaceData.bookedDates : [];
+          if (bookedDates.includes(activeBooking.date)) {
+            const spaceUpdate = {
+              bookedDates: bookedDates.filter((date) => date !== activeBooking.date),
+              bookingDateChange: {
+                action: 'orphan-release',
+                bookingId,
+                date: activeBooking.date
+              },
+              updatedAt: now
+            };
+            if (spaceData.lastBookingId === bookingId) spaceUpdate.status = 'available';
+            transaction.update(spaceRef, spaceUpdate);
+          }
         }
-        if (spaceData.lastBookingId === bookingId) spaceUpdate.status = 'available';
-        if (Object.keys(spaceUpdate).length > 1) transaction.update(spaceRef, spaceUpdate);
       }
       return true;
     });
